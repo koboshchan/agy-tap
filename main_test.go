@@ -110,3 +110,37 @@ func TestTranscriptWAL(t *testing.T) {
 		t.Fatalf("%+v %v", m, e)
 	}
 }
+
+func TestTerminalRepliesDoNotPoisonInput(t *testing.T) {
+	a := testTap()
+	for _, part := range []string{"\x1b[", "1;1R", "\x1b[?1;2c", "\x1b[I", "\x1b[O"} {
+		a.track([]byte(part))
+	}
+	a.lastInput = time.Now().Add(-time.Second)
+	a.screen.WriteString("> ")
+	a.lastOutput = time.Now().Add(-500 * time.Millisecond)
+	if !a.ready() {
+		t.Fatal("terminal protocol blocked idle prompt")
+	}
+	a.track([]byte("/model\r"))
+	a.lastInput = time.Now().Add(-time.Second)
+	a.unknown = true
+	a.screen.WriteString("\r> ")
+	a.lastOutput = time.Now().Add(-400 * time.Millisecond)
+	if !a.ready() {
+		t.Fatal("menu redraw did not recover")
+	}
+}
+func TestHistoricalPromptIsNotIdle(t *testing.T) {
+	a := testTap()
+	a.screen.WriteString("> \r\n> unfinished")
+	a.lastOutput = time.Now().Add(-time.Second)
+	if a.ready() {
+		t.Fatal("historical prompt accepted")
+	}
+	b := testTap()
+	b.screen.WriteString("> \r\nGenerating... esc to cancel")
+	if b.ready() {
+		t.Fatal("busy agent accepted")
+	}
+}
