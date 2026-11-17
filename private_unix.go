@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"syscall"
 )
 
 func privateDir(path string) error {
@@ -19,4 +20,12 @@ func privateDir(path string) error {
 		return fmt.Errorf("unsafe state directory")
 	}
 	return os.Chmod(path, 0700)
+}
+
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	e := syscall.Kill(pid, 0)
+	return e == nil || e == syscall.EPERM
 }

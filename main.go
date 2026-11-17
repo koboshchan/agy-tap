@@ -43,21 +43,23 @@ type queued struct {
 	Text string
 }
 type tap struct {
-	mu        sync.Mutex
-	p         io.Writer
-	screen    *vt.Emulator
-	prompt    *regexp.Regexp
-	bracketed bool
-	dirty     bool
-	awaiting  bool
-	sawBusy   bool
-	unknown   bool
-	lastInput time.Time
-	lastSend  time.Time
-	queue     []queued
-	next      int
-	info      discovery
-	audit     *log.Logger
+	mu         sync.Mutex
+	p          io.Writer
+	screen     *vt.Emulator
+	prompt     *regexp.Regexp
+	bracketed  bool
+	dirty      bool
+	awaiting   bool
+	sawBusy    bool
+	unknown    bool
+	escape     string
+	lastOutput time.Time
+	lastInput  time.Time
+	lastSend   time.Time
+	queue      []queued
+	next       int
+	info       discovery
+	audit      *log.Logger
 }
 
 func stateDir() string {
@@ -75,7 +77,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Println("agy-tap 0.1.0")
+		fmt.Println("agy-tap 0.1.1")
 		return nil
 	}
 	if len(args) > 0 && args[0] != "--" {
@@ -187,6 +189,7 @@ func run(args []string) error {
 			if n > 0 {
 				t.mu.Lock()
 				_, _ = t.screen.Write(buf[:n])
+				t.lastOutput = time.Now()
 				if t.awaiting {
 					if !t.prompt.MatchString(t.screen.String()) {
 						t.sawBusy = true
@@ -251,17 +254,34 @@ func run(args []string) error {
 	}()
 	return xpty.WaitProcess(ctx, cmd)
 }
+
+// Track editing separately from terminal protocol responses (which often contain ESC).
 func (t *tap) track(b []byte) {
 	t.lastInput = time.Now()
 	for _, c := range b {
+		if t.escape != "" {
+			t.escape += string(c)
+			if len(t.escape) == 2 && c != '[' && c != 'O' && c != ']' {
+				t.escape = ""
+				t.unknown = true
+				continue
+			}
+			if len(t.escape) > 2 && t.escape[1] != ']' && c >= 0x40 && c <= 0x7e {
+				t.escape = ""
+				continue
+			}
+			if len(t.escape) > 256 || c == 7 {
+				t.escape = ""
+				t.unknown = true
+			}
+			continue
+		}
 		switch c {
-		case 21:
+		case 27:
+			t.escape = "\x1b"
+		case 21, 13, 10:
 			t.dirty = false
 			t.unknown = false
-		case 13, 10:
-			t.dirty = false
-		case 27:
-			t.unknown = true
 		default:
 			if c >= 32 || c == 8 || c == 127 {
 				t.dirty = true
@@ -269,15 +289,46 @@ func (t *tap) track(b []byte) {
 		}
 	}
 }
+
+// Only the last visible prompt counts; historical empty prompts are not readiness.
+func (t *tap) emptyPrompt() bool {
+	lines := strings.Split(t.screen.String(), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, ">") || strings.HasPrefix(line, "❯") || strings.HasPrefix(line, "›") {
+			if !t.prompt.MatchString(lines[i]) {
+				return false
+			}
+			for _, tail := range lines[i+1:] {
+				tail = strings.TrimSpace(tail)
+				if tail == "" || strings.Trim(tail, "─━-") == "" || strings.HasPrefix(tail, "? for shortcuts") {
+					continue
+				}
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
 func (t *tap) ready() bool {
-	if t.awaiting || t.dirty || t.unknown || time.Since(t.lastInput) < 750*time.Millisecond || time.Since(t.lastSend) < 2*time.Second {
+	if time.Since(t.lastInput) < 750*time.Millisecond || time.Since(t.lastSend) < 2*time.Second || time.Since(t.lastOutput) < 350*time.Millisecond {
 		return false
 	}
-	screen := strings.ToLower(t.screen.String())
-	if strings.Contains(screen, "esc to cancel") || strings.Contains(screen, "generating...") || strings.Contains(screen, "do you trust") {
+	if !t.emptyPrompt() {
 		return false
 	}
-	return t.prompt.MatchString(t.screen.String())
+	// A settled empty prompt after redraw is authoritative, including after menus,
+	// terminal response sequences and editing that returned the line to empty.
+	if !t.lastOutput.IsZero() && t.lastOutput.After(t.lastInput) {
+		t.dirty = false
+		t.unknown = false
+		t.escape = ""
+		if t.awaiting && t.lastOutput.After(t.lastSend) {
+			t.awaiting = false
+		}
+	}
+	return !t.awaiting && !t.dirty && !t.unknown && t.escape == ""
 }
 func (t *tap) dispatch() {
 	t.mu.Lock()
@@ -409,6 +460,12 @@ func client(args []string) error {
 			var d discovery
 			b, e := os.ReadFile(p)
 			if e == nil && json.Unmarshal(b, &d) == nil {
+				if !alive(d) {
+					if !processExists(d.PID) {
+						_ = os.Remove(p)
+					}
+					continue
+				}
 				d.Token = ""
 				b, _ = json.Marshal(d)
 				fmt.Println(string(b))
@@ -430,6 +487,25 @@ func client(args []string) error {
 	var d discovery
 	if err = json.Unmarshal(b, &d); err != nil {
 		return err
+	}
+	if args[0] == "messages" {
+		since := -1
+		if len(args) > 2 {
+			since, err = strconv.Atoi(args[2])
+			if err != nil {
+				return err
+			}
+		}
+		m, e := messages(context.Background(), d.DB, since)
+		if e != nil {
+			return e
+		}
+		for _, v := range m {
+			if v.Role != "" && v.Text != "" {
+				fmt.Printf("[%d] %s\n%s\n\n", v.Index, v.Role, v.Text)
+			}
+		}
+		return nil
 	}
 	endpoint, method, body := "/"+args[0], "GET", []byte(nil)
 	switch args[0] {
@@ -465,4 +541,18 @@ func client(args []string) error {
 		return fmt.Errorf("HTTP %d", res.StatusCode)
 	}
 	return err
+}
+
+// Probe the authenticated endpoint rather than trusting reused OS process IDs.
+func alive(d discovery) bool {
+	c := &http.Client{Timeout: 750 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	r, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/status", d.Port), nil)
+	r.Header.Set("Authorization", "Bearer "+d.Token)
+	res, e := c.Do(r)
+	if e != nil {
+		return false
+	}
+	defer res.Body.Close()
+	var v struct{ PID int }
+	return res.StatusCode == 200 && json.NewDecoder(res.Body).Decode(&v) == nil && v.PID == d.PID
 }

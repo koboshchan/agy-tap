@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"golang.org/x/sys/windows"
 	"os"
 	"os/exec"
 	"os/user"
@@ -29,4 +30,20 @@ func privateDir(path string) error {
 		return fmt.Errorf("restrict state ACL: %w: %s", err, out)
 	}
 	return nil
+}
+
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	h, e := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if e != nil {
+		return e != windows.ERROR_INVALID_PARAMETER
+	}
+	defer windows.CloseHandle(h)
+	var code uint32
+	if windows.GetExitCodeProcess(h, &code) != nil {
+		return true
+	}
+	return code == 259
 }
