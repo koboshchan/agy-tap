@@ -77,7 +77,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Println("agy-tap 0.1.1")
+		fmt.Println("agy-tap 0.1.2")
 		return nil
 	}
 	if len(args) > 0 && args[0] != "--" {
@@ -130,7 +130,7 @@ func run(args []string) error {
 	}
 	defer auditFile.Close()
 	w, ht := 120, 40
-	if x, y, e := term.GetSize(int(os.Stdin.Fd())); e == nil {
+	if x, y, e := terminalSize(); e == nil {
 		w, ht = x, y
 	}
 	p, err := xpty.NewPty(w, ht)
@@ -160,6 +160,13 @@ func run(args []string) error {
 	}})
 	// Drain emulator responses, but don't feed them back: the real terminal answers queries.
 	go io.Copy(io.Discard, t.screen)
+	// Keep wrapper diagnostics outside the child's cursor coordinate stream.
+	fmt.Fprintf(os.Stderr, "agy-tap control file %s\r\n", file)
+	restoreOutput, err := prepareOutput()
+	if err != nil {
+		return err
+	}
+	defer restoreOutput()
 	if err = p.Start(cmd); err != nil {
 		return err
 	}
@@ -181,7 +188,6 @@ func run(args []string) error {
 	server := &http.Server{Handler: t.handler(), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 8192}
 	go server.Serve(ln)
 	defer server.Close()
-	fmt.Fprintf(os.Stderr, "agy-tap control file %s\r\n", file)
 	go func() {
 		buf := make([]byte, 32768)
 		for {
@@ -241,7 +247,7 @@ func run(args []string) error {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				x, y, e := term.GetSize(int(os.Stdin.Fd()))
+				x, y, e := terminalSize()
 				if e == nil && x > 0 && y > 0 && (x != w || y != ht) {
 					t.mu.Lock()
 					_ = p.Resize(x, y)
@@ -374,7 +380,7 @@ func (t *tap) handler() http.Handler {
 	mux.HandleFunc("GET /screen", func(w http.ResponseWriter, r *http.Request) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		reply(w, map[string]any{"screen": t.screen.String()})
+		reply(w, map[string]any{"screen": t.screen.String(), "width": t.screen.Width(), "height": t.screen.Height()})
 	})
 	mux.HandleFunc("GET /messages", func(w http.ResponseWriter, r *http.Request) {
 		since := -1
