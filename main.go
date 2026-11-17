@@ -273,6 +273,10 @@ func (t *tap) ready() bool {
 	if t.awaiting || t.dirty || t.unknown || time.Since(t.lastInput) < 750*time.Millisecond || time.Since(t.lastSend) < 2*time.Second {
 		return false
 	}
+	screen := strings.ToLower(t.screen.String())
+	if strings.Contains(screen, "esc to cancel") || strings.Contains(screen, "generating...") || strings.Contains(screen, "do you trust") {
+		return false
+	}
 	return t.prompt.MatchString(t.screen.String())
 }
 func (t *tap) dispatch() {
