@@ -77,7 +77,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Println("agy-tap 0.1.2")
+		fmt.Println("agy-tap 0.1.3")
 		return nil
 	}
 	if len(args) > 0 && args[0] != "--" {
@@ -140,6 +140,7 @@ func run(args []string) error {
 	defer p.Close()
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = os.Environ()
+	prepareChildTerminal(cmd)
 	t := &tap{p: p, screen: vt.NewEmulator(w, ht), info: info, audit: log.New(auditFile, "", 0)}
 	pattern := os.Getenv("AGY_TAP_PROMPT")
 	if pattern == "" {

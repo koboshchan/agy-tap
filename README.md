@@ -37,6 +37,10 @@ go build .
 GOOS=windows GOARCH=amd64 go build -o agy-tap.exe .
 ```
 
+Unix children now own the inner PTY as their controlling terminal and foreground process group. The kernel delivers SIGWINCH only after the inner size changes, rather than the child reading stale dimensions from the outer terminal's earlier signal. The existing 250 ms size polling remains unchanged. Windows ConPTY setup is unchanged.
+
+Run `python3 test_pty.py` for offline real-terminal coverage. It uses a fake TUI, checks initial dimensions and three repeated resizes at signal delivery, tests direct and nested wrappers, verifies foreground ownership and typed input, and checks normal/Ctrl-C exit, terminal restoration and child cleanup. CI runs these terminal tests on Linux and macOS, plus native Go tests on Windows. Windows ARM64 archives are cross-built, not native-console tested. Tagged releases include five platform archives and SHA-256 checksums; publishing a release does not reinstall any existing machine.
+
 Tests cover authentication, cross-origin rejection, control-character rejection, queue guards, bracketed paste, output-handle dimension selection and SQLite WAL transcript reads. Windows regression testing used a real outer ConPTY at 161x58, both directly and through Git Bash, with an actual agy TUI and Gemini responses. Typed and injected turns each rendered their user block and assistant answer once, with one footer. Resizing the outer terminal to 103x35 updated the child and kept the footer intact. The same harness against 0.1.1 confirmed that its child stayed at 120x40 and its footer overflowed after resize. VT streams and screen snapshots were captured locally. These were disposable sessions, not the user's live agent. Separate mintty pipe-based terminals and arbitrary TUI layouts remain unverified.
 
 MIT licensed. See LICENSE.
