@@ -1,55 +1,136 @@
-agy-tap wraps the Antigravity CLI in a terminal and lets another local process send messages to that same live session. It does not start a second agent or attach ACP to a different process.
+<div align="center">
 
-Install with Go 1.27.2 or newer.
+<strong>agy-tap</strong>
+
+Send input to the Antigravity session already running in your terminal.
+
+[![CI](https://github.com/koboshchan/agy-tap/actions/workflows/ci.yml/badge.svg)](https://github.com/koboshchan/agy-tap/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/koboshchan/agy-tap)](https://github.com/koboshchan/agy-tap/releases)
+[![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+[Install](#install) · [Quick start](#quick-start) · [Commands](#commands) · [Development](#development)
+
+</div>
+
+agy-tap wraps `agy` in a real terminal and gives other local processes a way to send messages, trigger the native send-immediately shortcut, read transcripts, and inspect the screen. You keep using the same live agent, not a second session.
+
+Linux, macOS, and WSL use a Unix PTY. Native Windows uses ConPTY. Keyboard input, terminal output, and resize events pass through the wrapper.
+
+<a id="install"></a>
+**Install**
+
+Download an archive from [Releases](https://github.com/koboshchan/agy-tap/releases/latest), verify its SHA-256 against `checksums.txt`, and put the extracted executable on PATH. Go is not required for prebuilt binaries.
+
+| Platform | Archive |
+| --- | --- |
+| Linux x64 / ARM64 | `agy-tap-linux-amd64.tar.gz` / `agy-tap-linux-arm64.tar.gz` |
+| macOS Apple Silicon | `agy-tap-darwin-arm64.tar.gz` |
+| Windows x64 / ARM64 | `agy-tap-windows-amd64.zip` / `agy-tap-windows-arm64.zip` |
+
+Or install from source with Go 1.27.2 or newer.
 
 ```sh
 go install github.com/koboshchan/agy-tap@latest
-HTTP_PROXY=http://127.0.0.1:8080 agy-tap -- agy --conversation=YOUR_CONVERSATION_ID
+agy-tap --version
 ```
 
-On PowerShell, set your usual environment variables first, then run the same wrapper command. Windows uses ConPTY; Linux and WSL use a Unix PTY. Environment variables pass through unchanged. Existing shells may need restarting after adding the binary directory to PATH.
+Install `agy` separately and make sure both executables are on PATH. Existing running wrappers retain their old behavior until restarted; replacing the client binary does not upgrade them.
 
-In another terminal, find the wrapper PID and use its local client.
+<a id="quick-start"></a>
+**Quick start**
+
+Start a wrapped session in your usual terminal. Your existing environment passes through unchanged.
+
+```sh
+agy-tap -- agy --conversation=EXISTING_ID
+```
+
+In another terminal, find the wrapper PID and send a message.
 
 ```sh
 agy-tap list
 agy-tap status 12345
 agy-tap send 12345 "Check the last test result"
-agy-tap force 12345
 agy-tap messages 12345
+```
+
+Use a full, existing conversation ID for transcript access. If the ID does not exist, agy may create a different conversation; agy-tap does not discover that replacement automatically.
+
+<a id="commands"></a>
+**Commands**
+
+| Command | Behavior |
+| --- | --- |
+| `agy-tap -- COMMAND [ARGS...]` | Run a command inside the wrapper |
+| `agy-tap list` | Discover local wrapper sessions |
+| `agy-tap status PID` | Show session details and bracketed-paste negotiation |
+| `agy-tap send PID TEXT` | Immediately write text/paste and Enter |
+| `agy-tap force PID` | Write exactly ESC followed by lowercase `m`, the native Alt+M shortcut |
+| `agy-tap messages PID [SINCE]` | Read transcript text after an optional exclusive step index |
+| `agy-tap screen PID` | Read the terminal snapshot and viewport dimensions |
+| `agy-tap --version` | Print the installed client version |
+
+```sh
+agy-tap send 12345 -- "--literal-text"
 agy-tap messages 12345 12
+agy-tap force 12345
 agy-tap screen 12345
 ```
 
-The optional number after messages is an exclusive step index. Pass a full existing conversation ID explicitly if you want transcript access. A nonexistent ID can make agy start a different conversation; agy-tap does not discover that replacement automatically.
+**Send and force are different**
 
-Every `send PID text` immediately types and submits an ordinary message through the shared terminal, even while agy is busy. There is no agy-tap message queue, idle detection, prompt matching, or draft guard. Agy's own Queued Messages setting decides whether it queues or acts on the message; a successful receipt is not a guarantee of immediate model execution. Multiline text requires negotiated bracketed paste; otherwise the call fails with HTTP 409 immediately instead of waiting.
+`send` writes immediately even while agy is busy. agy-tap has no message queue, idle detection, prompt matching, or draft guard. Agy's own Queued Messages setting decides what happens after submission. A successful receipt confirms terminal injection, not model execution.
 
-`force PID` is a separate trigger-only command. It writes exactly the native Alt+M shortcut (ESC followed by lowercase m) once, with no text or Enter. It does not implement a queue, clear busy state, send Ctrl-C, or signal the process. Use it to send the queued message immediately through agy's native binding. The observed busy UI shows a queued row with ‘alt+m to send immediately’, and the shortcut works with an empty editor in that case. It is not a promise to flush every queued message. Agy controls the shortcut's behavior in other states; this command does not add a payload-bearing variant of send.
+`force` is trigger-only. It sends Alt+M once, with no text, Enter, Ctrl-C, or process signal. In agy's busy UI, this invokes the queued row's native "send immediately" binding. It does not promise to flush every queued message, and behavior in other UI states belongs to agy.
 
-Local keyboard input and control commands share the same editor. Existing half-typed local text MAY COMBINE with a send and be submitted. Neither command detects, protects, erases, logs, or restores that local draft. Complete control writes and individual local-input read chunks are serialized, so a send's paste/text/Enter or a force shortcut cannot have other writer bytes inserted into it. This does not make a multi-read keyboard paste or fragmented terminal sequence one indivisible edit. Requests are applied in their serialized acceptance order; simultaneous callers have no guaranteed network-arrival order. A failed or short write returns an error without retry, because some input might already have reached agy.
+Send has no flags. Use `send PID -- "--literal-text"` for text beginning with dashes. The old experimental `send --force` form is unsupported. Multiline input requires negotiated bracketed paste; otherwise it fails immediately with HTTP 409.
 
-Send has no flags. For text starting with dashes use `send PID -- "--literal-text"`; after text starts all remaining arguments are literal. The obsolete experimental `send --force` form is not supported. Permission prompts remain the user's responsibility. Do not treat this wrapper as a guaranteed collision-free automation API. Existing running wrappers keep their old behavior until restarted; installing a new client does not upgrade those processes.
+> [!WARNING]
+> Local typing and injected messages share one editor. A half-written draft can combine with an injected message and be submitted. There is no draft protection or restoration. Permission prompts remain your responsibility.
 
-Each session listens only on a random 127.0.0.1 port. Its private ~/.agy-tap/PID.json contains a bearer token, port and conversation ID. Unix permissions and Windows ACLs restrict the state directory to its owner. Keep it private. The send endpoint can cause the agent to act with your account's permissions; do not expose the port to the network. Origin-bearing requests are refused, and the bundled client ignores HTTP proxy variables for loopback requests. Injected text is logged locally and may contain secrets.
+Complete control writes are serialized with individual keyboard-input reads. This prevents bytes from being inserted inside one control write, but does not make a fragmented keyboard paste atomic. Failed or short writes are not retried, since some input may already have reached agy.
 
-The authenticated HTTP interface provides POST /send with a JSON text property, bodyless POST /force, GET /status, GET /screen and GET /messages?since=12. Unknown send properties and any force body are rejected. Authentication and discovery permissions are unchanged. Status reports PID, conversation and bracketed-paste negotiation; obsolete queue/readiness/input-state fields are removed. The CLI messages command reads the database directly and prints only plain user/assistant text, so it also works with an older running wrapper. Accepted control commands return an injected receipt only after writing to the terminal, not proof that agy answered. Transcript reads open agy's SQLite database read-only with WAL support, decode user and assistant text from the observed v1.5.9 protobuf layout, and preserve unknown payloads as base64. The terminal snapshot is a fallback when transcript access is unavailable. It includes width and height so callers can check the child viewport.
+**Local interface and configuration**
 
-The implementation uses Charm's xpty and vt packages, modernc SQLite and protobuf wire decoding. Terminal input/output passes through the PTY; resize events follow the caller's terminal. On Windows, dimensions come from the output console handle, not the input handle, which cannot report screen-buffer dimensions. Native console output enables VT processing and deferred end-of-line wrapping, with the original modes restored on exit.
+Each wrapper listens on a random `127.0.0.1` port. Its owner-only `~/.agy-tap/PID.json` discovery file contains the port, bearer token, and conversation ID. Keep that file private. The bundled client ignores HTTP proxy variables for loopback requests, and the server rejects Origin-bearing requests.
+
+| Environment variable | Purpose |
+| --- | --- |
+| `AGY_TAP_DIR` | Override the local session-discovery directory |
+| `AGY_TAP_DB` | Override the agy transcript database path |
+
+| Authenticated HTTP route | Purpose |
+| --- | --- |
+| `POST /send` | JSON object with a `text` property; unknown properties rejected |
+| `POST /force` | Bodyless native shortcut trigger |
+| `GET /status` | Session status |
+| `GET /screen` | Terminal snapshot |
+| `GET /messages?since=12` | Transcript after an exclusive step index |
+
+> [!CAUTION]
+> The control interface can make the agent act with your account's permissions. Never expose it to the network. Injected text is logged locally and may contain sensitive material.
+
+The CLI's `messages` command reads SQLite directly in read-only mode with WAL support, including when the running wrapper is older. Transcript decoding targets the observed agy 1.5.9 protobuf layout; plain user/assistant text is printed, and the decoder preserves unknown payloads as base64. Use `screen` when transcript access is unavailable.
+
+**Under the terminal**
+
+[Charm xpty and vt](go.mod) provide terminal hosting and screen tracking; modernc SQLite and protobuf decoding support transcripts. Unix children own the inner PTY as their controlling terminal and foreground process group. Windows uses the output console for viewport dimensions, enables VT output modes, and restores original modes on exit.
+
+<a id="development"></a>
+**Development**
 
 ```sh
+git clone https://github.com/koboshchan/agy-tap.git
+cd agy-tap
 go test -race ./...
 go vet ./...
 go build .
-GOOS=windows GOARCH=amd64 go build -o agy-tap.exe .
+python3 test_pty.py
+python3 test_send_pty.py
 ```
 
-Unix children now own the inner PTY as their controlling terminal and foreground process group. The kernel delivers SIGWINCH only after the inner size changes, rather than the child reading stale dimensions from the outer terminal's earlier signal. The existing 250 ms size polling remains unchanged. Windows ConPTY setup is unchanged.
+The Python suites use offline fake TUIs, not model calls. They cover terminal ownership, resize delivery, cleanup, immediate sends, shortcut bytes, concurrent input, and shared-draft behavior. They establish wrapper behavior, not every native agy UI state.
 
-Run `python3 test_pty.py` for offline real-terminal coverage. It uses a fake TUI, checks initial dimensions and three repeated resizes at signal delivery, tests direct and nested wrappers, verifies foreground ownership and typed input, and checks normal/Ctrl-C exit, terminal restoration and child cleanup. CI runs these terminal tests on Linux and macOS, plus native Go tests on Windows. Windows ARM64 archives are cross-built, not native-console tested. Tagged releases include five platform archives and SHA-256 checksums; publishing a release does not reinstall any existing machine.
+[CI](.github/workflows/ci.yml) runs terminal tests on Linux and macOS and native Go tests on Windows. Windows ARM64 archives are cross-built, not native-console tested. Tagged releases publish five archives and checksums without reinstalling any machine.
 
-Run `python3 test_send_pty.py` for offline fake-TUI input tests. They check immediate ordinary sends while the original turn stays busy, exactly one contiguous Alt+M per force command (including the intended busy + queued message + empty editor use), no interruption, concurrent send/force/local-write serialization, fragmented local Unicode/paste/cursor input, accepted shared-draft behavior, no delayed tap dispatch, and terminal/child cleanup. These fake-PTY tests prove emitted bytes and wrapper behavior, not native agy UI semantics. No actual agy or model calls are used.
-
-Tests cover authentication, cross-origin rejection, control-character rejection, argument parsing, short writes, bracketed paste, output-handle dimension selection and SQLite WAL transcript reads. Windows regression testing used a real outer ConPTY at 161x58, both directly and through Git Bash, with an actual agy TUI and Gemini responses. Typed and injected turns each rendered their user block and assistant answer once, with one footer. Resizing the outer terminal to 103x35 updated the child and kept the footer intact. The same harness against 0.1.1 confirmed that its child stayed at 120x40 and its footer overflowed after resize. VT streams and screen snapshots were captured locally. These were disposable sessions, not the user's live agent. Separate mintty pipe-based terminals and arbitrary TUI layouts remain unverified.
-
-MIT licensed. See LICENSE.
+[MIT licensed](LICENSE).
