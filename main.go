@@ -38,28 +38,14 @@ type discovery struct {
 type request struct {
 	Text string `json:"text"`
 }
-type queued struct {
-	ID   int
-	Text string
-}
 type tap struct {
-	mu         sync.Mutex
-	p          io.Writer
-	screen     *vt.Emulator
-	prompt     *regexp.Regexp
-	bracketed  bool
-	dirty      bool
-	awaiting   bool
-	sawBusy    bool
-	unknown    bool
-	escape     string
-	lastOutput time.Time
-	lastInput  time.Time
-	lastSend   time.Time
-	queue      []queued
-	next       int
-	info       discovery
-	audit      *log.Logger
+	mu        sync.Mutex
+	p         io.Writer
+	screen    *vt.Emulator
+	bracketed bool
+	next      int
+	info      discovery
+	audit     *log.Logger
 }
 
 func stateDir() string {
@@ -77,14 +63,14 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Println("agy-tap 0.1.3")
+		fmt.Println("agy-tap 0.1.4")
 		return nil
 	}
 	if len(args) > 0 && args[0] != "--" {
 		return client(args)
 	}
 	if len(args) < 2 {
-		return errors.New("usage: agy-tap -- agy --conversation=<id> | agy-tap list | agy-tap send <pid> <text> | agy-tap messages <pid> [since]")
+		return errors.New("usage: agy-tap -- agy --conversation=<id> | agy-tap list | agy-tap send <pid> [--] <text> | agy-tap force <pid> | agy-tap messages <pid> [since]")
 	}
 	args = args[1:]
 	conv := ""
@@ -142,14 +128,6 @@ func run(args []string) error {
 	cmd.Env = os.Environ()
 	prepareChildTerminal(cmd)
 	t := &tap{p: p, screen: vt.NewEmulator(w, ht), info: info, audit: log.New(auditFile, "", 0)}
-	pattern := os.Getenv("AGY_TAP_PROMPT")
-	if pattern == "" {
-		pattern = `(?m)^\s*[❯›>]\s*$`
-	}
-	t.prompt, err = regexp.Compile(pattern)
-	if err != nil {
-		return err
-	}
 	t.screen.SetCallbacks(vt.Callbacks{EnableMode: func(m ansi.Mode) {
 		if m.Mode() == 2004 {
 			t.bracketed = true
@@ -196,15 +174,6 @@ func run(args []string) error {
 			if n > 0 {
 				t.mu.Lock()
 				_, _ = t.screen.Write(buf[:n])
-				t.lastOutput = time.Now()
-				if t.awaiting {
-					if !t.prompt.MatchString(t.screen.String()) {
-						t.sawBusy = true
-					}
-					if t.sawBusy && t.prompt.MatchString(t.screen.String()) {
-						t.awaiting = false
-					}
-				}
 				t.mu.Unlock()
 				_, _ = os.Stdout.Write(buf[:n])
 			}
@@ -218,25 +187,12 @@ func run(args []string) error {
 		for {
 			n, e := os.Stdin.Read(buf)
 			if n > 0 {
-				t.mu.Lock()
-				t.track(buf[:n])
-				_, _ = p.Write(buf[:n])
-				t.mu.Unlock()
+				if t.writeInput(buf[:n]) != nil {
+					return
+				}
 			}
 			if e != nil {
 				return
-			}
-		}
-	}()
-	go func() {
-		tick := time.NewTicker(100 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				t.dispatch()
 			}
 		}
 	}()
@@ -262,121 +218,57 @@ func run(args []string) error {
 	return xpty.WaitProcess(ctx, cmd)
 }
 
-// Track editing separately from terminal protocol responses (which often contain ESC).
-func (t *tap) track(b []byte) {
-	t.lastInput = time.Now()
-	for _, c := range b {
-		if t.escape != "" {
-			t.escape += string(c)
-			if len(t.escape) == 2 && c != '[' && c != 'O' && c != ']' {
-				t.escape = ""
-				t.unknown = true
-				continue
-			}
-			if len(t.escape) > 2 && t.escape[1] != ']' && c >= 0x40 && c <= 0x7e {
-				t.escape = ""
-				continue
-			}
-			if len(t.escape) > 256 || c == 7 {
-				t.escape = ""
-				t.unknown = true
-			}
-			continue
-		}
-		switch c {
-		case 27:
-			t.escape = "\x1b"
-		case 21, 13, 10:
-			t.dirty = false
-			t.unknown = false
-		default:
-			if c >= 32 || c == 8 || c == 127 {
-				t.dirty = true
-			}
-		}
-	}
-}
-
-// Only the last visible prompt counts; historical empty prompts are not readiness.
-func (t *tap) emptyPrompt() bool {
-	lines := strings.Split(t.screen.String(), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(line, ">") || strings.HasPrefix(line, "❯") || strings.HasPrefix(line, "›") {
-			if !t.prompt.MatchString(lines[i]) {
-				return false
-			}
-			for _, tail := range lines[i+1:] {
-				tail = strings.TrimSpace(tail)
-				if tail == "" || strings.Trim(tail, "─━-") == "" || strings.HasPrefix(tail, "? for shortcuts") {
-					continue
-				}
-				return false
-			}
-			return true
-		}
-	}
-	return false
-}
-func (t *tap) ready() bool {
-	if time.Since(t.lastInput) < 750*time.Millisecond || time.Since(t.lastSend) < 2*time.Second || time.Since(t.lastOutput) < 350*time.Millisecond {
-		return false
-	}
-	if !t.emptyPrompt() {
-		return false
-	}
-	// A settled empty prompt after redraw is authoritative, including after menus,
-	// terminal response sequences and editing that returned the line to empty.
-	if !t.lastOutput.IsZero() && t.lastOutput.After(t.lastInput) {
-		t.dirty = false
-		t.unknown = false
-		t.escape = ""
-		if t.awaiting && t.lastOutput.After(t.lastSend) {
-			t.awaiting = false
-		}
-	}
-	return !t.awaiting && !t.dirty && !t.unknown && t.escape == ""
-}
-func (t *tap) dispatch() {
+// writeInput serializes each physical-input read with complete control submissions.
+// It deliberately does not track or preserve the application's editor/draft state.
+func (t *tap) writeInput(data []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.queue) == 0 || !t.ready() {
-		return
+	return t.write(data)
+}
+
+// write requires mu. Never retry a failed/short write: it may have submitted input.
+func (t *tap) write(data []byte) error {
+	n, err := t.p.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
 	}
-	q := t.queue[0]
-	// Never inject multiline text as keystrokes without negotiated bracketed paste.
-	if strings.Contains(q.Text, "\n") && !t.bracketed {
-		return
-	}
-	payload := q.Text
+	return err
+}
+
+// inject requires mu and uses agy's ordinary paste + Enter input path.
+func (t *tap) inject(text string) error {
+	payload := text
 	if t.bracketed {
 		payload = "\x1b[200~" + payload + "\x1b[201~"
 	}
-	event := map[string]any{"id": q.ID, "time": time.Now().UTC(), "text": q.Text, "event": "attempt"}
+	return t.controlWrite("send", text, []byte(payload+"\r"))
+}
+
+// controlWrite requires mu. Only explicitly supplied text is audited, never local input.
+func (t *tap) controlWrite(kind, text string, data []byte) error {
+	t.next++
+	event := map[string]any{"id": t.next, "time": time.Now().UTC(), "command": kind, "event": "attempt"}
+	if kind == "send" {
+		event["text"] = text
+	}
 	b, _ := json.Marshal(event)
 	t.audit.Print(string(b))
-	n, err := t.p.Write([]byte(payload + "\r"))
+	err := t.write(data)
 	event["event"] = "injected"
-	event["bytes"] = n
 	if err != nil {
-		event["event"] = "write_error"
-		event["error"] = err.Error()
-		t.unknown = true
+		event["event"], event["error"] = "write_error", err.Error()
 	}
 	b, _ = json.Marshal(event)
 	t.audit.Print(string(b))
-	t.queue = t.queue[1:]
-	t.lastSend = time.Now()
-	// Require fresh visible readiness after this send, not just an old prompt.
-	t.awaiting = true
-	t.sawBusy = false
+	return err
 }
+
 func (t *tap) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		reply(w, map[string]any{"pid": t.info.PID, "conversation": t.info.Conversation, "queued": len(t.queue), "ready": t.ready(), "input_dirty": t.dirty, "input_unknown": t.unknown, "bracketed_paste": t.bracketed})
+		reply(w, map[string]any{"pid": t.info.PID, "conversation": t.info.Conversation, "bracketed_paste": t.bracketed})
 	})
 	mux.HandleFunc("GET /screen", func(w http.ResponseWriter, r *http.Request) {
 		t.mu.Lock()
@@ -420,14 +312,34 @@ func (t *tap) handler() http.Handler {
 		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		if len(t.queue) >= 64 {
-			http.Error(w, "queue full", 429)
+		if strings.Contains(q.Text, "\n") && !t.bracketed {
+			http.Error(w, "multiline text requires negotiated bracketed paste", http.StatusConflict)
 			return
 		}
-		t.next++
-		t.queue = append(t.queue, queued{t.next, q.Text})
+		if err := t.inject(q.Text); err != nil {
+			http.Error(w, "terminal write failed; input may be partially submitted, do not blindly retry", http.StatusBadGateway)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
-		reply(w, map[string]any{"id": t.next, "queued": len(t.queue)})
+		reply(w, map[string]any{"id": t.next, "injected": true})
+	})
+	mux.HandleFunc("POST /force", func(w http.ResponseWriter, r *http.Request) {
+		// Trigger only. Reject payloads rather than silently interpreting them as text.
+		r.Body = http.MaxBytesReader(w, r.Body, 1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) != 0 {
+			http.Error(w, "force accepts no body", http.StatusBadRequest)
+			return
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		// Explicit native Alt+M shortcut, not a cancellation or a tap queue bypass.
+		if err := t.controlWrite("force", "", []byte("\x1bm")); err != nil {
+			http.Error(w, "terminal write failed; shortcut may be partially sent, do not blindly retry", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		reply(w, map[string]any{"id": t.next, "injected": true})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -461,6 +373,22 @@ func reply(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func client(args []string) error {
+	if len(args) == 0 {
+		return errors.New("expected command")
+	}
+	var send request
+	if args[0] == "send" {
+		pid, q, err := parseSend(args[1:])
+		if err != nil {
+			return err
+		}
+		send = q
+		args = []string{"send", pid}
+	}
+	if args[0] == "force" && len(args) != 2 {
+		return errors.New("expected force PID (no text or flags)")
+	}
+
 	files, _ := filepath.Glob(filepath.Join(stateDir(), "*.json"))
 	if args[0] == "list" {
 		for _, p := range files {
@@ -517,10 +445,9 @@ func client(args []string) error {
 	endpoint, method, body := "/"+args[0], "GET", []byte(nil)
 	switch args[0] {
 	case "send":
-		if len(args) < 3 {
-			return errors.New("expected text")
-		}
-		body, _ = json.Marshal(request{strings.Join(args[2:], " ")})
+		body, _ = json.Marshal(send)
+		method = "POST"
+	case "force":
 		method = "POST"
 	case "messages":
 		if len(args) > 2 {
@@ -548,6 +475,30 @@ func client(args []string) error {
 		return fmt.Errorf("HTTP %d", res.StatusCode)
 	}
 	return err
+}
+
+// No send flags. An optional -- allows text beginning with dashes; once text
+// starts, every subsequent argument is literal and is never interpreted as a flag.
+func parseSend(args []string) (string, request, error) {
+	var q request
+	if len(args) < 2 {
+		return "", q, errors.New("expected send PID [--] text")
+	}
+	pid, err := strconv.Atoi(args[0])
+	if err != nil || pid <= 0 {
+		return "", q, errors.New("invalid PID")
+	}
+	text := args[1:]
+	if text[0] == "--" {
+		text = text[1:]
+	} else if strings.HasPrefix(text[0], "-") {
+		return "", q, errors.New("send has no flags; use -- before literal leading dashes")
+	}
+	q.Text = strings.Join(text, " ")
+	if err := validText(q.Text); err != nil {
+		return "", q, err
+	}
+	return strconv.Itoa(pid), q, nil
 }
 
 // Probe the authenticated endpoint rather than trusting reused OS process IDs.

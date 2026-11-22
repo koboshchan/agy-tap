@@ -59,7 +59,7 @@ finally:
 """
 
 class Terminal:
-    def __init__(self, command, root):
+    def __init__(self, command, root, child=CHILD):
         self.pidfile = root / "child.pid"
         self.output = b""
         self.status = None
@@ -79,7 +79,7 @@ class Terminal:
             if slave > 2:
                 os.close(slave)
             env = dict(os.environ, AGY_TAP_DIR=str(root / "state"))
-            os.execve(command[0], command + [sys.executable, "-c", CHILD,
+            os.execve(command[0], command + [sys.executable, "-c", child,
                                            str(self.pidfile)], env)
         os.close(slave)
 

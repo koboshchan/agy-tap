@@ -1,3 +1,4 @@
 dist/
 agy-tap
 agy-tap.exe
+__pycache__/

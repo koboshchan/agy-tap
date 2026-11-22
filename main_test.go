@@ -11,14 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
 func testTap() *tap {
-	return &tap{p: new(bytes.Buffer), screen: vt.NewEmulator(80, 24), prompt: regexp.MustCompile(`(?m)^> *$`), info: discovery{Token: "secret"}, audit: log.New(io.Discard, "", 0)}
+	return &tap{p: new(bytes.Buffer), screen: vt.NewEmulator(80, 24), info: discovery{Token: "secret"}, audit: log.New(io.Discard, "", 0)}
 }
 func TestHTTP(t *testing.T) {
 	a := testTap()
@@ -42,44 +40,6 @@ func TestHTTP(t *testing.T) {
 		if w.Code != tt.code {
 			t.Fatalf("%d != %d: %s", w.Code, tt.code, w.Body.String())
 		}
-	}
-}
-func TestQueue(t *testing.T) {
-	a := testTap()
-	a.screen.WriteString("> ")
-	a.queue = []queued{{1, "hello"}}
-	a.dirty = true
-	a.dispatch()
-	if len(a.queue) != 1 {
-		t.Fatal("clobbered user input")
-	}
-	a.dirty = false
-	a.dispatch()
-	if len(a.queue) != 0 || !a.awaiting {
-		t.Fatal("not sent")
-	}
-	if got := a.p.(*bytes.Buffer).String(); got != "hello\r" {
-		t.Fatal(got)
-	}
-	a.queue = []queued{{2, "again"}}
-	a.lastSend = time.Now().Add(-10 * time.Second)
-	a.dispatch()
-	if len(a.queue) != 1 {
-		t.Fatal("sent to stale prompt")
-	}
-}
-func TestMultiline(t *testing.T) {
-	a := testTap()
-	a.screen.WriteString("> ")
-	a.queue = []queued{{1, "a\nb"}}
-	a.dispatch()
-	if len(a.queue) != 1 {
-		t.Fatal("unbracketed paste")
-	}
-	a.bracketed = true
-	a.dispatch()
-	if a.p.(*bytes.Buffer).String() != "\x1b[200~a\nb\x1b[201~\r" {
-		t.Fatal("bad paste")
 	}
 }
 func wrap(n protowire.Number, b []byte) []byte {
@@ -108,39 +68,5 @@ func TestTranscriptWAL(t *testing.T) {
 	m, e = messages(context.Background(), p, 1)
 	if e != nil || len(m) != 0 {
 		t.Fatalf("%+v %v", m, e)
-	}
-}
-
-func TestTerminalRepliesDoNotPoisonInput(t *testing.T) {
-	a := testTap()
-	for _, part := range []string{"\x1b[", "1;1R", "\x1b[?1;2c", "\x1b[I", "\x1b[O"} {
-		a.track([]byte(part))
-	}
-	a.lastInput = time.Now().Add(-time.Second)
-	a.screen.WriteString("> ")
-	a.lastOutput = time.Now().Add(-500 * time.Millisecond)
-	if !a.ready() {
-		t.Fatal("terminal protocol blocked idle prompt")
-	}
-	a.track([]byte("/model\r"))
-	a.lastInput = time.Now().Add(-time.Second)
-	a.unknown = true
-	a.screen.WriteString("\r> ")
-	a.lastOutput = time.Now().Add(-400 * time.Millisecond)
-	if !a.ready() {
-		t.Fatal("menu redraw did not recover")
-	}
-}
-func TestHistoricalPromptIsNotIdle(t *testing.T) {
-	a := testTap()
-	a.screen.WriteString("> \r\n> unfinished")
-	a.lastOutput = time.Now().Add(-time.Second)
-	if a.ready() {
-		t.Fatal("historical prompt accepted")
-	}
-	b := testTap()
-	b.screen.WriteString("> \r\nGenerating... esc to cancel")
-	if b.ready() {
-		t.Fatal("busy agent accepted")
 	}
 }

@@ -26,7 +26,9 @@ jobs:
       - run: go vet ./...
       - run: go build -o dist/ .
       - if: runner.os != 'Windows'
-        run: python3 test_pty.py
+        run: |
+          python3 test_pty.py
+          python3 test_send_pty.py
   package:
     needs: test
     runs-on: ubuntu-latest
